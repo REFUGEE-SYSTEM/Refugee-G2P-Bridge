@@ -37,3 +37,7 @@ Standalone OpenG2P Bridge + Example Bank Simulator (`EXAMPLE-BANK` in `UGX`) for
 - `./scripts/logs.sh [service]` — tail service logs
 - `./scripts/down.sh` — stop containers (preserves volumes)
 - `./scripts/reset.sh [--yes]` — stop containers and delete `refugee_bridge_*` volumes only
+
+## Resource Use & Timing (Cleancheck Verified)
+- **E2E 3-beneficiary disbursement + MT940 reconciliation**: ~`25s` (`Poll 5`, 5s beat intervals)
+- **Memory (`docker stats --no-stream`, 8 containers)**: `~837.6 MiB` total (`bridge-celery-worker` `201.4 MiB`, `bridge-celery-beat` `167.8 MiB`, `example-bank-celery-beat` `127.2 MiB`, `example-bank-celery-worker` `121.9 MiB`, `bridge-partner-api` `73.45 MiB`, `postgres` `72.26 MiB`, `example-bank-api` `68.42 MiB`, `redis` `5.21 MiB`)
