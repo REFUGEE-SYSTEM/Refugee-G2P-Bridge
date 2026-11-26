@@ -1,0 +1,36 @@
+FROM python:3.12.11-alpine3.22
+
+ARG container_user=openg2p
+ARG container_user_group=openg2p
+ARG container_user_uid=1001
+ARG container_user_gid=1001
+
+# External OpenG2P library ref (not part of this repo). Override via build-arg /
+# workflow input. The example-bank code + models are installed from local source.
+# Build context = the example-bank/ folder.
+ARG FASTAPI_COMMON_REF=1.1
+
+RUN apk add --no-cache --virtual .build-deps gcc libc-dev linux-headers make \
+ && apk add --no-cache bash git libpq-dev
+
+RUN addgroup -g ${container_user_gid} ${container_user_group} \
+ && adduser -u ${container_user_uid} -G ${container_user_group} -D -s /bin/sh ${container_user}
+
+WORKDIR /app
+
+COPY --chown=${container_user}:${container_user_group} openg2p-example-bank-celery-workers /app/src
+COPY --chown=${container_user}:${container_user_group} openg2p-example-bank-celery-workers/main.py /app/main.py
+COPY --chown=${container_user}:${container_user_group} openg2p-example-bank-models /app/models
+
+RUN pip install --no-cache-dir \
+    "git+https://github.com/openg2p/openg2p-fastapi-common@${FASTAPI_COMMON_REF}#subdirectory=openg2p-fastapi-common" \
+    /app/models \
+    /app/src
+
+RUN apk del --no-network .build-deps
+
+USER ${container_user}
+
+ENV PYTHONUNBUFFERED=1
+
+CMD celery -A main.celery_app worker --loglevel=info -Q example_bank_queue

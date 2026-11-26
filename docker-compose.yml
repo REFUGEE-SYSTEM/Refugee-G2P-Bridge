@@ -1,0 +1,303 @@
+x-bridge-common-env: &bridge-common-env
+  G2P_BRIDGE_APP_PORT: "8000"
+  G2P_BRIDGE_APP_HOST: 0.0.0.0
+  G2P_BRIDGE_DB_DRIVER: postgresql+asyncpg
+  G2P_BRIDGE_DB_HOSTNAME: postgres
+  G2P_BRIDGE_DB_PORT: "5432"
+  G2P_BRIDGE_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+  G2P_BRIDGE_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+  G2P_BRIDGE_DB_DBNAME: ${BRIDGE_DB_NAME:-g2pbridgedb}
+  G2P_BRIDGE_CELERY_BROKER_URL: redis://redis:6379/0
+  G2P_BRIDGE_CELERY_BACKEND_URL: redis://redis:6379/0
+  G2P_BRIDGE_SIGNATURE_VALIDATION_ENABLED: "false"
+  G2P_BRIDGE_CRYPTO_BACKEND: local
+  G2P_BRIDGE_OAUTH_ENABLED: "false"
+  G2P_BRIDGE_AUTH_ENABLED: "false"
+  G2P_BRIDGE_OPENAPI_ROOT_PATH: /
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${BRIDGE_DB_USER:-bridgeuser}
+      POSTGRES_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      POSTGRES_DB: ${BRIDGE_DB_NAME:-g2pbridgedb}
+    ports:
+      - "${BRIDGE_POSTGRES_PORT:-5736}:5432"
+    volumes:
+      - refugee_bridge_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - refugee_bridge_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BRIDGE_DB_USER:-bridgeuser} -d ${BRIDGE_DB_NAME:-g2pbridgedb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${BRIDGE_REDIS_PORT:-6681}:6379"
+    volumes:
+      - refugee_bridge_redis_data:/data
+    networks:
+      - refugee_bridge_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  bridge-init:
+    build:
+      context: .
+      dockerfile: docker/bridge/Dockerfile
+    profiles: ["bootstrap"]
+    environment:
+      <<: *bridge-common-env
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /src/partner-api
+    command: ["sh", "-eu", "-c", "python3 /src/partner-api/main.py migrate && python3 /src/celery-workers/main.py migrate"]
+
+  example-bank-init:
+    build:
+      context: .
+      dockerfile: docker/example-bank/Dockerfile
+    profiles: ["bootstrap"]
+    environment:
+      EXAMPLE_BANK_DB_DRIVER: postgresql+asyncpg
+      EXAMPLE_BANK_DB_HOSTNAME: postgres
+      EXAMPLE_BANK_DB_PORT: "5432"
+      EXAMPLE_BANK_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      EXAMPLE_BANK_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      EXAMPLE_BANK_DB_DBNAME: ${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_BROKER_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_BACKEND_URL: redis://redis:6379/1
+      EXAMPLE_BANK_SEED_TREASURY_ACCOUNT: "true"
+      EXAMPLE_BANK_TREASURY_ACCOUNT_NUMBER: ${EXAMPLE_BANK_TREASURY_ACCOUNT_NUMBER:-1000000001}
+      EXAMPLE_BANK_TREASURY_ACCOUNT_CURRENCY: ${EXAMPLE_BANK_TREASURY_ACCOUNT_CURRENCY:-UGX}
+      EXAMPLE_BANK_TREASURY_AVAILABLE_BALANCE: ${EXAMPLE_BANK_TREASURY_AVAILABLE_BALANCE:-1000000000}
+      EXAMPLE_BANK_TREASURY_ACCOUNT_HOLDER_NAME: ${EXAMPLE_BANK_TREASURY_ACCOUNT_HOLDER_NAME:-Refugee Program Treasury}
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /src/example-bank/openg2p-example-bank-api
+    command: ["python3", "main.py", "migrate"]
+
+  bridge-partner-api:
+    build:
+      context: .
+      dockerfile: docker/bridge/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *bridge-common-env
+    ports:
+      - "${BRIDGE_API_PORT:-8395}:8000"
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/partner-api
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ping >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  bridge-celery-worker:
+    build:
+      context: .
+      dockerfile: docker/bridge/Dockerfile
+    restart: unless-stopped
+    environment:
+      G2P_BRIDGE_CELERY_WORKERS_DB_DRIVER: postgresql+psycopg2
+      G2P_BRIDGE_CELERY_WORKERS_DB_HOSTNAME: postgres
+      G2P_BRIDGE_CELERY_WORKERS_DB_PORT: "5432"
+      G2P_BRIDGE_CELERY_WORKERS_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      G2P_BRIDGE_CELERY_WORKERS_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      G2P_BRIDGE_CELERY_WORKERS_DB_DBNAME: ${BRIDGE_DB_NAME:-g2pbridgedb}
+      G2P_BRIDGE_CELERY_WORKERS_CELERY_BROKER_URL: redis://redis:6379/0
+      G2P_BRIDGE_CELERY_WORKERS_CELERY_BACKEND_URL: redis://redis:6379/0
+      G2P_BRIDGE_CELERY_WORKERS_CELERY_TASK_QUEUE: g2p_bridge_queue
+      G2P_BRIDGE_CELERY_WORKERS_IN_KIND_ENABLED: "false"
+      G2P_BRIDGE_CELERY_WORKERS_MAPPER_REQUEST_JWT_ENABLED: "false"
+      G2P_BRIDGE_CELERY_WORKERS_OAUTH_ENABLED: "false"
+      G2P_BRIDGE_CELERY_WORKERS_CRYPTO_BACKEND: local
+      G2P_BRIDGE_CELERY_WORKERS_MAPPER_RESOLUTION_MAX_ATTEMPTS: "3"
+      G2P_BRIDGE_MAPPER_CONNECTORS_SPAR_MAPPER_URL: http://host.docker.internal:${SPAR_MAPPER_PORT:-8390}/mapper/resolve
+      G2P_BRIDGE_MAPPER_CONNECTORS_SPAR_MAPPER_API_SIGN_ENABLED: "false"
+      G2P_BRIDGE_BANK_CONNECTORS_FUNDS_AVAILABLE_CHECK_URL_EXAMPLE_BANK: http://example-bank-api:8000/check_funds
+      G2P_BRIDGE_BANK_CONNECTORS_FUNDS_BLOCK_URL_EXAMPLE_BANK: http://example-bank-api:8000/block_funds
+      G2P_BRIDGE_BANK_CONNECTORS_FUNDS_DISBURSEMENT_URL_EXAMPLE_BANK: http://example-bank-api:8000/initiate_payment
+      G2P_BRIDGE_BANK_CONNECTORS_BANK_SIMULATOR_CODE: EXAMPLE-BANK
+      G2P_BRIDGE_CELERY_WORKERS_SPONSOR_BANK_CONFIGURATIONS: '{"default":{"sponsor_bank_code":"EXAMPLE-BANK","program_account_number":"1000000001","program_account_type":"CHECKING","program_account_branch_code":"MAIN"}}'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/celery-workers
+    command: ["celery", "-A", "main.celery_app", "worker", "-Q", "g2p_bridge_queue", "--loglevel=info", "--concurrency=2"]
+
+  bridge-celery-beat:
+    build:
+      context: .
+      dockerfile: docker/bridge/Dockerfile
+    restart: unless-stopped
+    environment:
+      G2P_BRIDGE_CELERY_BEAT_DB_DRIVER: postgresql
+      G2P_BRIDGE_CELERY_BEAT_DB_HOSTNAME: postgres
+      G2P_BRIDGE_CELERY_BEAT_DB_PORT: "5432"
+      G2P_BRIDGE_CELERY_BEAT_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      G2P_BRIDGE_CELERY_BEAT_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      G2P_BRIDGE_CELERY_BEAT_DB_DBNAME: ${BRIDGE_DB_NAME:-g2pbridgedb}
+      G2P_BRIDGE_CELERY_BEAT_CELERY_BROKER_URL: redis://redis:6379/0
+      G2P_BRIDGE_CELERY_BEAT_CELERY_BACKEND_URL: redis://redis:6379/0
+      G2P_BRIDGE_CELERY_BEAT_CELERY_WORKER_TASK_QUEUE: g2p_bridge_queue
+      G2P_BRIDGE_CELERY_BEAT_IN_KIND_ENABLED: "false"
+      G2P_BRIDGE_CELERY_BEAT_MAPPER_RESOLVE_FREQUENCY: "5"
+      G2P_BRIDGE_CELERY_BEAT_FUNDS_AVAILABLE_CHECK_FREQUENCY: "5"
+      G2P_BRIDGE_CELERY_BEAT_FUNDS_BLOCKED_FREQUENCY: "5"
+      G2P_BRIDGE_CELERY_BEAT_FUNDS_DISBURSEMENT_FREQUENCY: "5"
+      G2P_BRIDGE_CELERY_BEAT_MT940_PROCESSOR_FREQUENCY: "5"
+      G2P_BRIDGE_CELERY_BEAT_NO_OF_TASKS_TO_PROCESS: "10"
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/celery-beat-producers
+    command: ["celery", "-A", "main.celery_app", "worker", "--beat", "-Q", "celery", "--loglevel=info", "--concurrency=1", "--schedule=/tmp/celery-beat-bridge.db"]
+
+  example-bank-api:
+    build:
+      context: .
+      dockerfile: docker/example-bank/Dockerfile
+    restart: unless-stopped
+    environment:
+      EXAMPLE_BANK_APP_PORT: "8000"
+      EXAMPLE_BANK_APP_HOST: 0.0.0.0
+      EXAMPLE_BANK_DB_DRIVER: postgresql+asyncpg
+      EXAMPLE_BANK_DB_HOSTNAME: postgres
+      EXAMPLE_BANK_DB_PORT: "5432"
+      EXAMPLE_BANK_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      EXAMPLE_BANK_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      EXAMPLE_BANK_DB_DBNAME: ${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_BROKER_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_BACKEND_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_WORKER_TASK_QUEUE: example_bank_queue
+      EXAMPLE_BANK_SEED_TREASURY_ACCOUNT: "true"
+      EXAMPLE_BANK_TREASURY_ACCOUNT_NUMBER: ${EXAMPLE_BANK_TREASURY_ACCOUNT_NUMBER:-1000000001}
+      EXAMPLE_BANK_TREASURY_ACCOUNT_CURRENCY: ${EXAMPLE_BANK_TREASURY_ACCOUNT_CURRENCY:-UGX}
+      EXAMPLE_BANK_TREASURY_AVAILABLE_BALANCE: ${EXAMPLE_BANK_TREASURY_AVAILABLE_BALANCE:-1000000000}
+      EXAMPLE_BANK_TREASURY_ACCOUNT_HOLDER_NAME: ${EXAMPLE_BANK_TREASURY_ACCOUNT_HOLDER_NAME:-Refugee Program Treasury}
+      EXAMPLE_BANK_OPENAPI_ROOT_PATH: /
+    ports:
+      - "${EXAMPLE_BANK_PORT:-8396}:8000"
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/example-bank/openg2p-example-bank-api
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ping >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  example-bank-celery-worker:
+    build:
+      context: .
+      dockerfile: docker/example-bank/Dockerfile
+    restart: unless-stopped
+    environment:
+      EXAMPLE_BANK_CELERY_DB_HOSTNAME: postgres
+      EXAMPLE_BANK_CELERY_DB_PORT: "5432"
+      EXAMPLE_BANK_CELERY_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      EXAMPLE_BANK_CELERY_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      EXAMPLE_BANK_CELERY_DB_DBNAME: ${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_DB_DRIVER: postgresql
+      EXAMPLE_BANK_CELERY_DB_DATASOURCE: postgresql://${BRIDGE_DB_USER:-bridgeuser}:${BRIDGE_DB_PASSWORD}@postgres:5432/${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_CELERY_BROKER_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_CELERY_BACKEND_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_CELERY_TASK_QUEUE: example_bank_queue
+      EXAMPLE_BANK_CELERY_CELERY_WORKER_TASK_QUEUE: example_bank_queue
+      EXAMPLE_BANK_CELERY_PROCESS_PAYMENT_FREQUENCY: "5"
+      EXAMPLE_BANK_CELERY_PAYMENT_INITIATE_ATTEMPTS: "3"
+      EXAMPLE_BANK_CELERY_MT940_STATEMENT_CALLBACK_URL: http://bridge-partner-api:8000/upload_mt940
+      EXAMPLE_BANK_CELERY_BANK_SIMULATOR_CODE: EXAMPLE-BANK
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/example-bank/openg2p-example-bank-celery-workers
+    command: ["celery", "-A", "main.celery_app", "worker", "-Q", "example_bank_queue", "--loglevel=info", "--concurrency=1"]
+
+  example-bank-celery-beat:
+    build:
+      context: .
+      dockerfile: docker/example-bank/Dockerfile
+    restart: unless-stopped
+    environment:
+      EXAMPLE_BANK_CELERY_DB_HOSTNAME: postgres
+      EXAMPLE_BANK_CELERY_DB_PORT: "5432"
+      EXAMPLE_BANK_CELERY_DB_USERNAME: ${BRIDGE_DB_USER:-bridgeuser}
+      EXAMPLE_BANK_CELERY_DB_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      EXAMPLE_BANK_CELERY_DB_DBNAME: ${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_DB_DRIVER: postgresql
+      EXAMPLE_BANK_CELERY_DB_DATASOURCE: postgresql://${BRIDGE_DB_USER:-bridgeuser}:${BRIDGE_DB_PASSWORD}@postgres:5432/${EXAMPLE_BANK_DB_NAME:-examplebankdb}
+      EXAMPLE_BANK_CELERY_CELERY_BROKER_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_CELERY_BACKEND_URL: redis://redis:6379/1
+      EXAMPLE_BANK_CELERY_CELERY_TASK_QUEUE: example_bank_queue
+      EXAMPLE_BANK_CELERY_CELERY_WORKER_TASK_QUEUE: example_bank_queue
+      EXAMPLE_BANK_CELERY_PROCESS_PAYMENT_FREQUENCY: "5"
+      EXAMPLE_BANK_CELERY_PAYMENT_INITIATE_ATTEMPTS: "3"
+      EXAMPLE_BANK_CELERY_MT940_STATEMENT_CALLBACK_URL: http://bridge-partner-api:8000/upload_mt940
+      EXAMPLE_BANK_CELERY_BANK_SIMULATOR_CODE: EXAMPLE-BANK
+    networks:
+      - refugee_bridge_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /src/example-bank/openg2p-example-bank-celery-beat-producers
+    command: ["celery", "-A", "main.celery_app", "worker", "--beat", "-Q", "celery", "--loglevel=info", "--concurrency=1", "--schedule=/tmp/celery-beat-example-bank.db"]
+
+volumes:
+  refugee_bridge_postgres_data:
+  refugee_bridge_redis_data:
+
+networks:
+  refugee_bridge_net:
+    driver: bridge
