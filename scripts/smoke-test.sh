@@ -93,6 +93,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from datetime import date
 
 bridge_url = sys.argv[1]
 env_id = f"smoke-env-{uuid.uuid4().hex[:8]}"
@@ -145,7 +146,7 @@ env_req = {
                 "number_of_disbursements": 3,
                 "total_disbursement_quantity": 300000.0,
                 "measurement_unit": "UGX",
-                "disbursement_schedule_date": "2026-11-26",
+                "disbursement_schedule_date": date.today().isoformat(),
             }
         ]
     },
